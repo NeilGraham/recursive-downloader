@@ -16,6 +16,15 @@ from queue import Queue
 
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from dotenv import dotenv_values
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+env = dotenv_values(os.path.join(script_dir, ".env"))
+# Remove any empty values from env
+for key, value in env.items():
+    if value.strip() == "":
+        env.pop(key)
 
 # Selenium imports (optional)
 try:
@@ -458,42 +467,46 @@ Examples:
     parser.add_argument(
         "--search",
         nargs="+",
-        required=True,
+        default=env["SEARCH"].split(" ") if "SEARCH" in env else [],
         help="Search patterns in order (e.g., *.html *.mp3 *.mp3)",
     )
     parser.add_argument(
         "--mode",
         choices=["requests", "chrome", "firefox"],
-        default="requests",
+        default=env.get("MODE", "requests"),
         help="Fetching mode (default: requests)",
     )
     parser.add_argument(
         "--output",
         "-o",
-        default="downloads",
+        default=env.get("OUTPUT", "downloads"),
         help="Output directory (default: downloads)",
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=1.0,
+        default=float(env.get("DELAY", 1.0)),
         help="Delay between requests in seconds (default: 1.0)",
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
+        default=env.get("VERBOSE", "false").lower() == "true",
         help="Show detailed output",
     )
     parser.add_argument(
         "--workers",
         "-w",
         type=int,
-        default=4,
+        default=int(env.get("WORKERS", 4)),
         help="Max concurrent browsers for Selenium mode (default: 4)",
     )
 
     args = parser.parse_args()
+
+    if not args.search:
+        raise ValueError("--search argument is required")
 
     # Set global verbose mode and browser type
     global verbose_mode, browser_type
