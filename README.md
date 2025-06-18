@@ -5,7 +5,7 @@
 ```bash
 python run.py \
     'https://downloads.khinsider.com/game-soundtracks/album/metal-gear-solid-4-guns-of-the-patriots-the-complete-soundtrack' \
-    --search *.mp3 *.flac
+    --search *.mp3 *.flac \
     --mode chrome
 ```
 
