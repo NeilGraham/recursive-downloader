@@ -3,7 +3,7 @@
 ## Example
 
 ```bash
-python run.py \
+./bin/recursive-dl \
     'https://downloads.khinsider.com/game-soundtracks/album/metal-gear-solid-4-guns-of-the-patriots-the-complete-soundtrack' \
     --search *.mp3 *.flac \
     --mode chrome
