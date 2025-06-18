@@ -43,6 +43,19 @@ except ImportError:
 
 # Global variables
 session = requests.Session()
+# Configure session for better concurrency and reliability
+session.headers.update(
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+)
+# Set connection pooling for better concurrent performance
+adapter = requests.adapters.HTTPAdapter(
+    pool_connections=20, pool_maxsize=20, max_retries=3
+)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
 browser_pool = Queue()
 verbose_mode = False
 
@@ -100,9 +113,21 @@ def get_page(url, mode="requests", driver=None, browser_type="chrome"):
     try:
         if mode == "requests":
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": url,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
             }
+            # Add a small random delay to avoid rate limiting
+            time.sleep(random.uniform(0.5, 1.5))
             response = session.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             return BeautifulSoup(response.content, "html.parser")
@@ -156,7 +181,15 @@ def download_file(url, output_dir):
     """Download a file"""
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
         }
 
         if verbose_mode:
@@ -274,18 +307,14 @@ def recursive_search(
 
     download_count = 0
 
-    # Use concurrent processing for multiple links with remaining patterns in browser mode
-    use_concurrent = (
-        len(links) > 1
-        and remaining_patterns
-        and mode in ["chrome", "firefox"]
-        and depth == 0
-    )
+    # Use concurrent processing for multiple links with remaining patterns
+    use_concurrent = len(links) > 1 and remaining_patterns and depth == 0
 
     if use_concurrent:
+        worker_type = "workers" if mode == "requests" else "concurrent browsers"
         if not verbose_mode:
             print(
-                f"{indent}Processing {len(links)} links with {min(max_workers, len(links))} concurrent browsers..."
+                f"{indent}Processing {len(links)} links with {min(max_workers, len(links))} {worker_type}..."
             )
 
         worker_args = [
@@ -312,32 +341,60 @@ def recursive_search(
                     if verbose_mode:
                         print(f"Worker error: {e}")
     else:
-        # Sequential processing
-        for i, link in enumerate(links, 1):
-            clean_name = unquote(os.path.basename(link))
+        # Check if we should use concurrent downloading for final files
+        use_concurrent_download = (
+            len(links) > 1 and not remaining_patterns and depth == 0 and max_workers > 1
+        )
 
-            if verbose_mode:
-                print(f"{indent}[{i}/{len(links)}] Processing: {clean_name}")
-            elif depth == 0:
-                print(f"[{i}/{len(links)}] {clean_name}")
-
-            if remaining_patterns:
-                download_count += recursive_search(
-                    link,
-                    remaining_patterns,
-                    depth + 1,
-                    mode,
-                    output_dir,
-                    delay,
-                    max_workers,
-                    browser_type,
-                    driver,
+        if use_concurrent_download:
+            worker_type = "download workers"
+            if not verbose_mode:
+                print(
+                    f"{indent}Downloading {len(links)} files with {min(max_workers, len(links))} {worker_type}..."
                 )
-            else:
-                if download_file(link, output_dir):
-                    download_count += 1
 
-            time.sleep(0.3 if remaining_patterns else 0.5)
+            download_args = [(link, output_dir) for link in links]
+
+            with ThreadPoolExecutor(
+                max_workers=min(max_workers, len(links))
+            ) as executor:
+                futures = [
+                    executor.submit(download_file, *args) for args in download_args
+                ]
+                for future in as_completed(futures):
+                    try:
+                        if future.result():
+                            download_count += 1
+                    except Exception as e:
+                        if verbose_mode:
+                            print(f"Download error: {e}")
+        else:
+            # Sequential processing
+            for i, link in enumerate(links, 1):
+                clean_name = unquote(os.path.basename(link))
+
+                if verbose_mode:
+                    print(f"{indent}[{i}/{len(links)}] Processing: {clean_name}")
+                elif depth == 0:
+                    print(f"[{i}/{len(links)}] {clean_name}")
+
+                if remaining_patterns:
+                    download_count += recursive_search(
+                        link,
+                        remaining_patterns,
+                        depth + 1,
+                        mode,
+                        output_dir,
+                        delay,
+                        max_workers,
+                        browser_type,
+                        driver,
+                    )
+                else:
+                    if download_file(link, output_dir):
+                        download_count += 1
+
+                time.sleep(0.3 if remaining_patterns else 0.5)
 
     return download_count
 
@@ -395,7 +452,7 @@ Examples:
         "-w",
         type=int,
         default=int(env.get("WORKERS", 4)),
-        help="Max concurrent browsers for Selenium mode (default: 4)",
+        help="Max concurrent workers/browsers (default: 4)",
     )
 
     args = parser.parse_args()
@@ -410,8 +467,9 @@ Examples:
     print(f"Search patterns: {' -> '.join(args.search)}")
     print(f"Mode: {args.mode}")
     print(f"Output: {args.output}")
-    if args.mode in ["chrome", "firefox"]:
-        print(f"Concurrent browsers: {args.workers}")
+    if args.workers > 1:
+        worker_type = "browsers" if args.mode in ["chrome", "firefox"] else "workers"
+        print(f"Concurrent {worker_type}: {args.workers}")
     if verbose_mode:
         print("Verbose: enabled")
     print("-" * 50)
