@@ -7,14 +7,15 @@ Downloads files by recursively following links based on search patterns.
 import argparse
 import os
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
 import time
 import sys
 import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
+
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 
 # Selenium imports (optional)
 try:
