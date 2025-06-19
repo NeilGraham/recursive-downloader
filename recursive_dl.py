@@ -160,6 +160,38 @@ def get_page(url, mode="requests", driver=None, browser_type="chrome"):
         return None
 
 
+def parse_pattern(pattern_str):
+    """Parse a pattern string that may contain fallback patterns separated by '>'
+
+    Examples:
+        "*.mp3" -> ["*.mp3"]
+        "*.flac>*.mp3" -> ["*.flac", "*.mp3"]
+        "*.flac>*.ogg>*.mp3" -> ["*.flac", "*.ogg", "*.mp3"]
+    """
+    if ">" in pattern_str:
+        return [p.strip() for p in pattern_str.split(">")]
+    return [pattern_str]
+
+
+def find_links_with_fallback(soup, base_url, pattern_str):
+    """Find links with fallback pattern support"""
+    if not soup:
+        return []
+
+    fallback_patterns = parse_pattern(pattern_str)
+
+    for pattern in fallback_patterns:
+        links = find_links(soup, base_url, pattern)
+        if links:
+            if verbose_mode and len(fallback_patterns) > 1:
+                print(f"    Using pattern {pattern} (found {len(links)} links)")
+            return links
+        elif verbose_mode and len(fallback_patterns) > 1:
+            print(f"    No matches for {pattern}, trying fallback...")
+
+    return []
+
+
 def find_links(soup, base_url, pattern):
     """Find all links matching pattern"""
     if not soup:
@@ -295,12 +327,29 @@ def recursive_search(
             print(f"{indent}Failed to fetch page")
         return 0
 
-    links = find_links(soup, url, pattern)
+    links = find_links_with_fallback(soup, url, pattern)
 
     if not verbose_mode and links:
-        print(f"{indent}Found {len(links)} {pattern} links")
+        # Show which pattern was actually used for fallback patterns
+        if ">" in pattern:
+            fallback_patterns = parse_pattern(pattern)
+            used_pattern = None
+            # Find which pattern was actually used by checking what links we found
+            for p in fallback_patterns:
+                test_links = find_links(soup, url, p)
+                if test_links:
+                    used_pattern = p
+                    break
+            if used_pattern and used_pattern != fallback_patterns[0]:
+                print(
+                    f"{indent}Found {len(links)} {used_pattern} links (fallback from {fallback_patterns[0]})"
+                )
+            else:
+                print(f"{indent}Found {len(links)} {pattern} links")
+        else:
+            print(f"{indent}Found {len(links)} {pattern} links")
     elif verbose_mode and links:
-        print(f"{indent}Found {len(links)} {pattern} links")
+        print(f"{indent}Found {len(links)} links for pattern {pattern}")
 
     if not links:
         return 0
@@ -410,6 +459,12 @@ Examples:
   # Find .html pages, then .mp3 links, then download .mp3 files  
   python recursive_dl.py 'https://example.com' --search *.html *.mp3 *.mp3
   
+  # Try .flac first, fallback to .mp3 if no .flac files found
+  python recursive_dl.py 'https://example.com' --search *.mp3 '*.flac>*.mp3'
+  
+  # Multiple fallbacks: try .flac, then .ogg, then .mp3
+  python recursive_dl.py 'https://example.com' --search *.mp3 '*.flac>*.ogg>*.mp3'
+  
   # Use browser mode for protected sites
   python recursive_dl.py 'https://example.com' --search *.mp3 *.mp3 --mode chrome
         """,
@@ -420,7 +475,7 @@ Examples:
         "--search",
         nargs="+",
         default=env.get("SEARCH", "").split() or [],
-        help="Search patterns in order (e.g., *.html *.mp3 *.mp3)",
+        help="Search patterns in order (e.g., *.html *.mp3 *.mp3). Supports fallbacks with '>' (e.g., '*.flac>*.mp3')",
     )
     parser.add_argument(
         "--mode",
