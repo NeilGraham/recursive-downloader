@@ -19,6 +19,14 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import dotenv_values
 
+# Additional imports for xpath support (optional)
+try:
+    from lxml import etree, html
+
+    LXML_AVAILABLE = True
+except ImportError:
+    LXML_AVAILABLE = False
+
 # Load environment variables
 env = {
     k: v
@@ -106,6 +114,116 @@ def cleanup_browsers():
             browser_pool.get_nowait().quit()
         except:
             break
+
+
+def normalize_xpath(xpath_expr):
+    """Normalize XPath expression to handle shell escaping issues"""
+    if not xpath_expr:
+        return None
+
+    # Handle the case where users need to use triple slashes due to shell escaping
+    # Convert ///tag to //tag (absolute path)
+    # Convert ////tag to ///tag (less common, but handle it)
+    if xpath_expr.startswith("///") and not xpath_expr.startswith("////"):
+        xpath_expr = xpath_expr[1:]  # Remove one leading slash
+
+    return xpath_expr
+
+
+def extract_title(
+    url, xpath_expression, mode="requests", driver=None, browser_type="chrome"
+):
+    """Extract title from page using XPath expression"""
+    if not xpath_expression:
+        return None
+
+    # Normalize the XPath expression to handle shell escaping
+    xpath_expression = normalize_xpath(xpath_expression)
+
+    try:
+        if mode == "requests":
+            if not LXML_AVAILABLE:
+                print("Warning: lxml not available. Install with: pip install lxml")
+                print("Falling back to --mode chrome/firefox for XPath support")
+                return None
+
+            # Use lxml with requests
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+            }
+
+            time.sleep(random.uniform(0.5, 1.5))
+            response = session.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+
+            # Parse with lxml
+            tree = html.fromstring(response.content)
+            elements = tree.xpath(xpath_expression)
+
+            if elements:
+                # Get text content from the first matching element
+                if hasattr(elements[0], "text_content"):
+                    title = elements[0].text_content().strip()
+                else:
+                    title = str(elements[0]).strip()
+
+                if title:
+                    # Clean the title for use as folder name
+                    title = re.sub(r'[<>:"/\\|?*]', "_", title)
+                    title = re.sub(r"\s+", " ", title).strip()
+                    return title
+
+        else:
+            # Use selenium for chrome/firefox
+            should_return = driver is None
+            if not driver:
+                driver = get_browser(browser_type)
+            if not driver:
+                return None
+
+            try:
+                driver.get(url)
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                time.sleep(1)
+
+                # Use selenium's xpath finder
+                elements = driver.find_elements(By.XPATH, xpath_expression)
+
+                if elements:
+                    title = elements[0].text.strip()
+                    if title:
+                        # Clean the title for use as folder name
+                        title = re.sub(r'[<>:"/\\|?*]', "_", title)
+                        title = re.sub(r"\s+", " ", title).strip()
+                        return title
+
+                if should_return:
+                    browser_pool.put(driver)
+
+            except Exception as e:
+                if verbose_mode:
+                    print(f"Error extracting title from {url}: {e}")
+                if should_return and driver:
+                    browser_pool.put(driver)
+
+    except Exception as e:
+        if verbose_mode:
+            print(f"Error extracting title from {url}: {e}")
+
+    return None
 
 
 def get_page(url, mode="requests", driver=None, browser_type="chrome"):
@@ -278,6 +396,8 @@ def process_worker(args):
         link_index,
         total_links,
         browser_type,
+        title_xpath,
+        base_title,
     ) = args
 
     driver = get_browser(browser_type) if mode in ["chrome", "firefox"] else None
@@ -287,7 +407,17 @@ def process_worker(args):
             print(f"  [{link_index}/{total_links}] Worker processing: {clean_name}")
 
         count = recursive_search(
-            link, patterns, depth + 1, mode, output_dir, delay, 1, browser_type, driver
+            link,
+            patterns,
+            depth + 1,
+            mode,
+            output_dir,
+            delay,
+            1,
+            browser_type,
+            driver,
+            title_xpath,
+            base_title,
         )
         return count
     finally:
@@ -305,6 +435,8 @@ def recursive_search(
     max_workers=4,
     browser_type="chrome",
     driver=None,
+    title_xpath=None,
+    base_title=None,
 ):
     """Recursively search and download files"""
     if not patterns:
@@ -326,6 +458,23 @@ def recursive_search(
         if verbose_mode:
             print(f"{indent}Failed to fetch page")
         return 0
+
+    # Extract title if xpath is provided and create appropriate output directory
+    current_output_dir = output_dir
+    current_title = base_title
+
+    if title_xpath and depth == 0:
+        # Extract title from the current page for the root URL
+        page_title = extract_title(url, title_xpath, mode, driver, browser_type)
+        if page_title:
+            current_title = page_title
+            current_output_dir = os.path.join(output_dir, page_title)
+            if verbose_mode:
+                print(f"{indent}Extracted title: '{page_title}'")
+            print(f"{indent}Output directory: {current_output_dir}")
+    elif depth > 0:
+        # For nested downloads, the output_dir already contains the title path
+        current_output_dir = output_dir
 
     links = find_links_with_fallback(soup, url, pattern)
 
@@ -372,11 +521,13 @@ def recursive_search(
                 remaining_patterns,
                 depth,
                 mode,
-                output_dir,
+                current_output_dir,
                 delay,
                 i + 1,
                 len(links),
                 browser_type,
+                None,  # Don't pass title_xpath to nested calls
+                current_title,
             )
             for i, link in enumerate(links)
         ]
@@ -402,7 +553,7 @@ def recursive_search(
                     f"{indent}Downloading {len(links)} files with {min(max_workers, len(links))} {worker_type}..."
                 )
 
-            download_args = [(link, output_dir) for link in links]
+            download_args = [(link, current_output_dir) for link in links]
 
             with ThreadPoolExecutor(
                 max_workers=min(max_workers, len(links))
@@ -433,14 +584,16 @@ def recursive_search(
                         remaining_patterns,
                         depth + 1,
                         mode,
-                        output_dir,
+                        current_output_dir,
                         delay,
                         max_workers,
                         browser_type,
                         driver,
+                        None,  # Don't pass title_xpath to nested calls
+                        current_title,
                     )
                 else:
-                    if download_file(link, output_dir):
+                    if download_file(link, current_output_dir):
                         download_count += 1
 
                 time.sleep(0.3 if remaining_patterns else 0.5)
@@ -467,6 +620,12 @@ Examples:
   
   # Use browser mode for protected sites
   python recursive_dl.py 'https://example.com' --search *.mp3 *.mp3 --mode chrome
+  
+  # Use title extraction to organize downloads into folders (use triple slash due to shell escaping)
+  python recursive_dl.py 'https://example.com' --search *.mp3 *.mp3 --title '///h1/text()'
+  
+  # Extract title from page title tag using requests mode
+  python recursive_dl.py 'https://example.com' --search *.mp3 *.mp3 --title '///title/text()' --mode requests
         """,
     )
 
@@ -509,6 +668,11 @@ Examples:
         default=int(env.get("WORKERS", 4)),
         help="Max concurrent workers/browsers (default: 4)",
     )
+    parser.add_argument(
+        "--title",
+        default=env.get("TITLE"),
+        help="XPath expression to extract page title for folder naming (e.g. '//h2'). Downloads files to folder '{output}/{title}/'",
+    )
 
     args = parser.parse_args()
 
@@ -522,6 +686,10 @@ Examples:
     print(f"Search patterns: {' -> '.join(args.search)}")
     print(f"Mode: {args.mode}")
     print(f"Output: {args.output}")
+    if args.title:
+        if args.title.startswith("/") and args.title[1] != "/":
+            args.title = "//" + args.title[1:]
+        print(f"Title XPath: {args.title}")
     if args.workers > 1:
         worker_type = "browsers" if args.mode in ["chrome", "firefox"] else "workers"
         print(f"Concurrent {worker_type}: {args.workers}")
@@ -538,6 +706,7 @@ Examples:
             delay=args.delay,
             max_workers=args.workers,
             browser_type=args.mode,
+            title_xpath=args.title if args.title else None,
         )
         print(f"\n✅ Completed! Downloaded {count} files to '{args.output}'")
     except KeyboardInterrupt:
